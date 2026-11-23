@@ -1,33 +1,58 @@
+/** Return the preferred image type for the current browser viewport. */
+export function getDuoImageType() {
+  return getViewportLayout(globalThis.window).imageType;
+}
+
+/** Report the initial viewport layout and subsequent changes. Returns a cleanup function. */
+export function watchDuoLayout(onChange) {
+  const viewport = globalThis.window;
+  let previousScreenMode;
+  let previousImageType;
+
+  function update() {
+    const { screenMode, imageType } = getViewportLayout(viewport);
+    if (screenMode === previousScreenMode && imageType === previousImageType) return;
+
+    previousScreenMode = screenMode;
+    previousImageType = imageType;
+    onChange({ screenMode, imageType });
+  }
+
+  update();
+  viewport?.addEventListener('resize', update);
+  return () => viewport?.removeEventListener('resize', update);
+}
+
 /**
- * Resolve the layout and image candidates using CSS pixel dimensions.
- * `width` and `height` describe the page content area. The image box can have
- * its own dimensions. `view` is either `single` or `pair`.
+ * Resolve image candidates from `coverUrl` and optional `duoLandscapeUrl`.
+ * Read the current browser viewport. On the server, use the cover.
  */
-export function resolveDuoImage({
-  width,
-  height,
-  imageWidth = width,
-  imageHeight = height,
+export function resolveDuoImage(options = {}) {
+  const { columns, imageType } = getViewportLayout(globalThis.window, options);
+  const sources = getImageSources(options.images ?? options, imageType);
+  return { columns, sources };
+}
+
+function getViewportLayout(viewport, {
   view = 'single',
   minWidth = 640,
   minHeight = 500,
-  images = {},
-}) {
+} = {}) {
+  const width = viewport?.innerWidth;
+  const height = viewport?.innerHeight;
   const isLarge = width >= minWidth && height >= minHeight;
   const isPair = view === 'pair';
-  const columns = isLarge && isPair ? 2 : 1;
+  return {
+    columns: isLarge && isPair ? 2 : 1,
+    screenMode: isLarge ? 'large' : 'compact',
+    imageType: isLarge && !isPair && width > height ? 'duo' : 'cover',
+  };
+}
+
+function getImageSources(images, imageType) {
   const cover = imageUrl(images.coverUrl);
-
-  if (!isLarge || isPair) {
-    return { columns, sources: cover ? [cover] : [] };
-  }
-
-  const directionUrl = imageWidth > imageHeight
-    ? images.duoLandscapeUrl
-    : images.duoPortraitUrl;
-  const preferred = imageUrl(directionUrl);
-  const sources = [preferred, cover].filter(Boolean);
-  return { columns, sources: [...new Set(sources)] };
+  const landscape = imageType === 'duo' ? imageUrl(images.duoLandscapeUrl) : '';
+  return [...new Set([landscape, cover].filter(Boolean))];
 }
 
 function imageUrl(value) {
@@ -36,15 +61,15 @@ function imageUrl(value) {
 
 /**
  * Bind one page to its image frames. Each item takes a `frame` element, `alt`,
- * `coverUrl`, and optional `duoLandscapeUrl` and `duoPortraitUrl`.
- * Give the container and frames CSS-defined sizes so image loading cannot change
- * the measured layout. For a pair, use a grid with this column definition:
+ * `coverUrl`, and optional `duoLandscapeUrl`. The window's resize event
+ * triggers selection. The observer defers loading until the frames have size.
+ * For a pair, use a grid with this column definition:
  * `repeat(var(--duo-columns, 1), minmax(0, 1fr))`.
  * Call the returned function when unmounting or binding a new set of items.
  */
 export function bindDuoImages({ container, items, view = 'single', minWidth, minHeight }) {
-  const { ResizeObserver } = container.ownerDocument.defaultView;
-  const sizes = new Map();
+  const viewport = container.ownerDocument.defaultView;
+  const visible = new Set();
   const frames = items.map(({ frame, alt = '', ...images }) => ({
     frame,
     alt,
@@ -54,36 +79,30 @@ export function bindDuoImages({ container, items, view = 'single', minWidth, min
   }));
   let columns;
 
-  const observer = new ResizeObserver((entries) => {
-    for (const { target, contentRect } of entries) {
-      sizes.set(target, contentRect);
+  function update() {
+    if (!visible.has(container)) return;
+
+    const layout = getViewportLayout(viewport, { view, minWidth, minHeight });
+    if (columns !== layout.columns) {
+      columns = layout.columns;
+      container.style.setProperty('--duo-columns', String(columns));
     }
-
-    const content = sizes.get(container);
-    if (!content?.width || !content.height) return;
-
     for (const state of frames) {
-      const box = sizes.get(state.frame);
-      const layout = resolveDuoImage({
-        width: content.width,
-        height: content.height,
-        imageWidth: box?.width,
-        imageHeight: box?.height,
-        view,
-        minWidth,
-        minHeight,
-        images: state.images,
-      });
-
-      if (columns !== layout.columns) {
-        columns = layout.columns;
-        container.style.setProperty('--duo-columns', String(columns));
+      if (visible.has(state.frame)) {
+        showImage(state, getImageSources(state.images, layout.imageType));
       }
-
-      if (box?.width && box.height) showImage(state, layout.sources);
     }
+  }
+
+  const observer = new viewport.ResizeObserver((entries) => {
+    for (const { target, contentRect } of entries) {
+      if (contentRect.width && contentRect.height) visible.add(target);
+      else visible.delete(target);
+    }
+    update();
   });
 
+  viewport.addEventListener('resize', update);
   observer.observe(container);
   for (const state of frames) {
     showStatus(state.frame, '图片加载中…');
@@ -91,6 +110,7 @@ export function bindDuoImages({ container, items, view = 'single', minWidth, min
   }
 
   return () => {
+    viewport.removeEventListener('resize', update);
     observer.disconnect();
     for (const state of frames) state.sources = null;
   };
