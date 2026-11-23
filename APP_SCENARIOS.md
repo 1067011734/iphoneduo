@@ -1,5 +1,7 @@
 # 折叠屏 App 图片展示场景
 
+选图和窗口监听的接入方式见 [React H5 指南](./h5/DUO_H5_USAGE.md) 和 [微信小程序指南](./miniprogram/DUO_MINIPROGRAM_USAGE.md)。
+
 | 场景 | 使用时机 | App 内的表现 |
 | --- | --- | --- |
 | 外屏封面 | 设备合上时 | 在外屏显示封面。 |
